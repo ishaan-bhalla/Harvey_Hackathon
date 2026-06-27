@@ -208,3 +208,82 @@ def run_pleading_analysis(document_paths: list) -> dict:
         "gaps": [r for r in matrix if r["gap"]],
         "contradictions": [r for r in matrix if len(r["contradicting"]) > 0]
     }
+
+def run_pleading_analysis_with_progress(document_paths: list, progress_callback=None) -> dict:
+    """
+    Same as run_pleading_analysis but calls progress_callback
+    after each allegation is processed so the frontend can show a progress bar.
+    """
+    from services.document_parser import parse_document
+
+    print(f"Parsing {len(document_paths)} documents...")
+    documents = []
+    for path in document_paths:
+        try:
+            doc = parse_document(path)
+            documents.append(doc)
+            print(f"  Parsed: {doc.witness_name}")
+        except Exception as e:
+            print(f"  Failed: {path} — {e}")
+
+    total_steps = len(HORIZON_PLEADINGS)
+    matrix = []
+
+    for i, allegation in enumerate(HORIZON_PLEADINGS):
+        if progress_callback:
+            progress_callback(
+                i,
+                total_steps,
+                f"Analysing allegation {i+1}/{total_steps}: {allegation['topic'].replace('_', ' ')}"
+            )
+
+        print(f"\nAllegation {allegation['id']}: {allegation['allegation'][:60]}...")
+        row = {
+            "allegation_id": allegation["id"],
+            "allegation": allegation["allegation"],
+            "topic": allegation["topic"],
+            "supporting": [],
+            "contradicting": [],
+            "not_addressed": [],
+            "gap": True
+        }
+
+        for doc in documents:
+            result = classify_witness_against_pleading(allegation, doc)
+            print(f"  {doc.witness_name}: {result['verdict']} ({result['confidence']})")
+
+            if result["verdict"] == "SUPPORTS":
+                row["supporting"].append(result)
+                row["gap"] = False
+            elif result["verdict"] == "CONTRADICTS":
+                row["contradicting"].append(result)
+                row["gap"] = False
+            elif result["verdict"] == "UNVERIFIED":
+                row["not_addressed"].append(doc.witness_name)
+            else:
+                row["not_addressed"].append(doc.witness_name)
+
+        matrix.append(row)
+
+    if progress_callback:
+        progress_callback(total_steps, total_steps, "Generating report...")
+
+    supported = sum(1 for r in matrix if len(r["supporting"]) > 0)
+    score = round((supported / len(matrix)) * 100, 1)
+
+    if score >= 70:
+        readiness = "STRONG"
+    elif score >= 40:
+        readiness = "MODERATE"
+    else:
+        readiness = "VULNERABLE"
+
+    return {
+        "documents_analysed": [d.witness_name for d in documents],
+        "total_allegations": len(HORIZON_PLEADINGS),
+        "trial_readiness": readiness,
+        "trial_readiness_score": score,
+        "matrix": matrix,
+        "gaps": [r for r in matrix if r["gap"]],
+        "contradictions": [r for r in matrix if len(r["contradicting"]) > 0]
+    }

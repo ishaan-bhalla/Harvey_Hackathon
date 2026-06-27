@@ -124,21 +124,33 @@ def run_analysis_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
 # Background pleading analysis task
 def run_pleading_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
     try:
-        from services.pleading_generator import run_pleading_analysis
+        from services.pleading_generator import run_pleading_analysis_with_progress
         _jobs[job_id]["status"] = "running"
+        _jobs[job_id]["progress"] = 5
+        _jobs[job_id]["progress_message"] = "Parsing documents..."
+
         all_docs = [primary_pdf] + comparison_pdfs
-        result = run_pleading_analysis(all_docs)
+
+        def progress_callback(current: int, total: int, message: str):
+            _jobs[job_id]["progress"] = int((current / total) * 90) + 5
+            _jobs[job_id]["progress_message"] = message
+
+        result = run_pleading_analysis_with_progress(all_docs, progress_callback)
         _jobs[job_id]["status"] = "complete"
+        _jobs[job_id]["progress"] = 100
+        _jobs[job_id]["progress_message"] = "Complete"
         _jobs[job_id]["result"] = result
     except Exception as e:
         _jobs[job_id]["status"] = "failed"
+        _jobs[job_id]["progress"] = 0
+        _jobs[job_id]["progress_message"] = f"Failed: {str(e)}"
         _jobs[job_id]["error"] = str(e)
 
 # Submit analysis job — returns immediately with job_id
 @app.post("/analyze")
 def analyze(request: AnalysisRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "queued", "result": None, "error": None}
+    _jobs[job_id] = {"status": "queued", "result": None, "error": None, "progress": 0, "progress_message": "Queued"}
     background_tasks.add_task(
         run_analysis_job,
         job_id,
@@ -154,7 +166,7 @@ def analyze_pleading(request: AnalysisRequest, background_tasks: BackgroundTasks
     against the selected witness statements. More powerful than witness-vs-witness.
     """
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "queued", "result": None, "error": None}
+    _jobs[job_id] = {"status": "queued", "result": None, "error": None, "progress": 0, "progress_message": "Queued"}
     background_tasks.add_task(
         run_pleading_job,
         job_id,
@@ -190,6 +202,8 @@ def get_job(job_id: str):
     return {
         "job_id": job_id,
         "status": job["status"],
+        "progress": job.get("progress", 0),
+        "progress_message": job.get("progress_message", ""),
         "result": job["result"],
         "error": job["error"]
     }

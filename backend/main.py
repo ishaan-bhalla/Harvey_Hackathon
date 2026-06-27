@@ -140,6 +140,13 @@ def run_pleading_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
         _jobs[job_id]["progress"] = 100
         _jobs[job_id]["progress_message"] = "Complete"
         _jobs[job_id]["result"] = result
+        # Build Neo4j graph from results
+        try:
+            from clients.neo4j_client import build_graph_from_analysis
+            build_graph_from_analysis(result)
+            print("Neo4j graph updated")
+        except Exception as e:
+            print(f"Neo4j graph update failed (non-critical): {e}")
     except Exception as e:
         _jobs[job_id]["status"] = "failed"
         _jobs[job_id]["progress"] = 0
@@ -192,6 +199,15 @@ def submit_review(request: ReviewRequest):
 def get_reviews(job_id: str):
     job_reviews = [r for r in _reviews if r["job_id"] == job_id]
     return {"job_id": job_id, "reviews": job_reviews, "count": len(job_reviews)}
+
+@app.get("/graph")
+def get_graph():
+    """Returns witness-allegation relationship graph for visualisation."""
+    try:
+        from clients.neo4j_client import get_graph_data
+        return get_graph_data()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Poll for job status
 @app.get("/jobs/{job_id}")

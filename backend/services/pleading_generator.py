@@ -3,6 +3,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from clients.claude_client import call_claude
+from clients.perplexity_client import search_case_law
 import json
 
 def verify_quote(quote: str, raw_text: str) -> bool:
@@ -189,6 +190,15 @@ def run_pleading_analysis(document_paths: list) -> dict:
 
         matrix.append(row)
 
+        # Enrich with case law via Perplexity
+        try:
+            case_law = search_case_law(allegation["allegation"], allegation["topic"])
+            row["case_law"] = case_law["case_law"]
+            row["case_law_sources"] = case_law["sources"]
+        except Exception as e:
+            row["case_law"] = None
+            row["case_law_sources"] = []
+
     supported = sum(1 for r in matrix if len(r["supporting"]) > 0)
     score = round((supported / len(matrix)) * 100, 1)
 
@@ -264,6 +274,15 @@ def run_pleading_analysis_with_progress(document_paths: list, progress_callback=
                 row["not_addressed"].append(doc.witness_name)
 
         matrix.append(row)
+
+        # Enrich with case law via Perplexity
+        try:
+            case_law = search_case_law(allegation["allegation"], allegation["topic"])
+            row["case_law"] = case_law["case_law"]
+            row["case_law_sources"] = case_law["sources"]
+        except Exception as e:
+            row["case_law"] = None
+            row["case_law_sources"] = []
 
     if progress_callback:
         progress_callback(total_steps, total_steps, "Generating report...")

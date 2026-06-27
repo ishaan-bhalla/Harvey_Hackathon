@@ -113,6 +113,19 @@ def run_analysis_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
         _jobs[job_id]["status"] = "failed"
         _jobs[job_id]["error"] = str(e)
 
+# Background pleading analysis task
+def run_pleading_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
+    try:
+        from services.pleading_generator import run_pleading_analysis
+        _jobs[job_id]["status"] = "running"
+        all_docs = [primary_pdf] + comparison_pdfs
+        result = run_pleading_analysis(all_docs)
+        _jobs[job_id]["status"] = "complete"
+        _jobs[job_id]["result"] = result
+    except Exception as e:
+        _jobs[job_id]["status"] = "failed"
+        _jobs[job_id]["error"] = str(e)
+
 # Submit analysis job — returns immediately with job_id
 @app.post("/analyze")
 def analyze(request: AnalysisRequest, background_tasks: BackgroundTasks):
@@ -120,6 +133,22 @@ def analyze(request: AnalysisRequest, background_tasks: BackgroundTasks):
     _jobs[job_id] = {"status": "queued", "result": None, "error": None}
     background_tasks.add_task(
         run_analysis_job,
+        job_id,
+        request.primary_pdf,
+        request.comparison_pdfs
+    )
+    return {"job_id": job_id, "status": "queued"}
+
+@app.post("/analyze/pleading")
+def analyze_pleading(request: AnalysisRequest, background_tasks: BackgroundTasks):
+    """
+    Runs the synthetic pleading analysis — tests 8 formal Horizon allegations
+    against the selected witness statements. More powerful than witness-vs-witness.
+    """
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"status": "queued", "result": None, "error": None}
+    background_tasks.add_task(
+        run_pleading_job,
         job_id,
         request.primary_pdf,
         request.comparison_pdfs

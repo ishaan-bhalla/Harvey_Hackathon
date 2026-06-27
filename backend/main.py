@@ -253,6 +253,19 @@ def list_snapshots():
         "count": len(snapshots)
     }
 
+@app.get("/snapshots/compare/{snapshot_id_a}/{snapshot_id_b}")
+def compare_snapshots(snapshot_id_a: int, snapshot_id_b: int):
+    from services.change_detector import detect_changes
+    snapshots = load_snapshots()
+    snapshot_map = {s["id"]: s for s in snapshots}
+    if snapshot_id_a not in snapshot_map:
+        raise HTTPException(status_code=404, detail=f"Snapshot {snapshot_id_a} not found")
+    if snapshot_id_b not in snapshot_map:
+        raise HTTPException(status_code=404, detail=f"Snapshot {snapshot_id_b} not found")
+    old = snapshot_map[snapshot_id_a]["result"]
+    new = snapshot_map[snapshot_id_b]["result"]
+    return detect_changes(old, new)
+
 @app.get("/snapshots/{snapshot_id}")
 def get_snapshot(snapshot_id: int):
     snapshots = load_snapshots()

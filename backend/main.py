@@ -23,6 +23,9 @@ _documents_cache = None
 _jobs = {}  # job_id -> {status, result, error}
 _reviews = []
 
+# Pre-computed demo result cache
+_demo_result = None
+
 # Request schemas
 class AnalysisRequest(BaseModel):
     primary_pdf: str
@@ -208,6 +211,77 @@ def get_graph():
         return get_graph_data()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/demo")
+def get_demo():
+    """
+    Returns pre-computed analysis result instantly.
+    Use this for presentations — no waiting for Claude API.
+    """
+    global _demo_result
+    if _demo_result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Demo not pre-computed yet. POST to /demo/precompute first."
+        )
+    return _demo_result
+
+@app.post("/demo/precompute")
+def precompute_demo(background_tasks: BackgroundTasks):
+    """
+    Runs the best witness combination and caches the result.
+    Call this once before the presentation.
+    """
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"status": "queued", "result": None, "error": None, "progress": 0, "progress_message": "Queued"}
+    background_tasks.add_task(
+        run_demo_precompute,
+        job_id
+    )
+    return {"job_id": job_id, "status": "queued", "message": "Pre-computing demo result..."}
+
+def run_demo_precompute(job_id: str):
+    global _demo_result
+    try:
+        from services.pleading_generator import run_pleading_analysis_with_progress
+        _jobs[job_id]["status"] = "running"
+
+        # Best witness combination — produces STRONG 75% with 2 contradictions
+        all_docs = [
+            "data/raw/WITN03540100.pdf",
+            "data/raw/witn04510100.pdf",
+            "data/raw/WITN04770100 - Steve Bansal - Witness statement.pdf",
+            "data/raw/witn09830100.pdf",
+            "data/raw/WITN08130100.pdf",
+            "data/raw/WITN04630100 - Rod Ismay - First Witness Statement.pdf"
+        ]
+
+        def progress_callback(current, total, message):
+            _jobs[job_id]["progress"] = int((current / total) * 90) + 5
+            _jobs[job_id]["progress_message"] = message
+
+        result = run_pleading_analysis_with_progress(all_docs, progress_callback)
+
+        # Cache it
+        _demo_result = result
+
+        # Also build Neo4j graph
+        try:
+            from clients.neo4j_client import build_graph_from_analysis
+            build_graph_from_analysis(result)
+        except Exception as e:
+            print(f"Neo4j update failed: {e}")
+
+        _jobs[job_id]["status"] = "complete"
+        _jobs[job_id]["progress"] = 100
+        _jobs[job_id]["progress_message"] = "Demo pre-computed and cached"
+        _jobs[job_id]["result"] = result
+        print("Demo result cached successfully")
+
+    except Exception as e:
+        _jobs[job_id]["status"] = "failed"
+        _jobs[job_id]["error"] = str(e)
+        print(f"Demo precompute failed: {e}")
 
 # Poll for job status
 @app.get("/jobs/{job_id}")

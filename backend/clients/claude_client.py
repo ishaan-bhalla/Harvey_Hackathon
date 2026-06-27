@@ -1,6 +1,5 @@
-# backend/clients/claude_client.py
-
 import os
+import time
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -8,18 +7,10 @@ load_dotenv()
 
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-def call_claude(prompt: str, system: str = None, max_tokens: int = 2000) -> str:
+def call_claude(prompt: str, system: str = None, max_tokens: int = 2000, retries: int = 3) -> str:
     """
-    Single function that wraps all Claude API calls.
-    Every service in this project calls this — never calls Anthropic directly.
-
-    Args:
-        prompt: The user message to send
-        system: Optional system prompt to set Claude's role
-        max_tokens: Max length of response (default 2000)
-
-    Returns:
-        Claude's response as a plain string
+    Single entry point for all Claude API calls.
+    Retries up to 3 times on failure with exponential backoff.
     """
     messages = [{"role": "user", "content": prompt}]
 
@@ -32,5 +23,15 @@ def call_claude(prompt: str, system: str = None, max_tokens: int = 2000) -> str:
     if system:
         kwargs["system"] = system
 
-    response = client.messages.create(**kwargs)
-    return response.content[0].text
+    last_error = None
+    for attempt in range(retries):
+        try:
+            response = client.messages.create(**kwargs)
+            return response.content[0].text
+        except Exception as e:
+            last_error = e
+            wait = 2 ** attempt  # 1s, 2s, 4s
+            print(f"Claude API attempt {attempt + 1} failed: {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+
+    raise Exception(f"Claude API failed after {retries} attempts: {last_error}")

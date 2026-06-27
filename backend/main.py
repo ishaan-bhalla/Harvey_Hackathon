@@ -7,6 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from services.report_generator import run_analysis
 from services.document_parser import parse_document
+from services.storage import (
+    save_job, load_jobs, save_reviews, load_reviews,
+    save_demo, load_demo, save_snapshot, load_snapshots
+)
 import uuid
 
 app = FastAPI(title="Pleading-to-Proof API")
@@ -18,13 +22,11 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# In-memory stores
+# Persistent stores — survive server restarts
 _documents_cache = None
-_jobs = {}  # job_id -> {status, result, error}
-_reviews = []
-
-# Pre-computed demo result cache
-_demo_result = None
+_jobs = load_jobs()
+_reviews = load_reviews()
+_demo_result = load_demo()
 
 # Request schemas
 class AnalysisRequest(BaseModel):
@@ -37,6 +39,10 @@ class ReviewRequest(BaseModel):
     ai_verdict: str
     decision: str          # "accepted", "overruled", "rejected"
     reviewer_note: str = ""
+
+class SnapshotRequest(BaseModel):
+    label: str
+    job_id: str
 
 # Health check
 @app.get("/health")
@@ -77,6 +83,7 @@ def list_documents():
 def run_analysis_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
     try:
         _jobs[job_id]["status"] = "running"
+        save_job(job_id, _jobs[job_id])
         report = run_analysis(primary_pdf, comparison_pdfs)
         _jobs[job_id]["status"] = "complete"
         _jobs[job_id]["result"] = {
@@ -120,9 +127,11 @@ def run_analysis_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
                 for row in report.contradictions
             ]
         }
+        save_job(job_id, _jobs[job_id])
     except Exception as e:
         _jobs[job_id]["status"] = "failed"
         _jobs[job_id]["error"] = str(e)
+        save_job(job_id, _jobs[job_id])
 
 # Background pleading analysis task
 def run_pleading_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
@@ -131,6 +140,7 @@ def run_pleading_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
         _jobs[job_id]["status"] = "running"
         _jobs[job_id]["progress"] = 5
         _jobs[job_id]["progress_message"] = "Parsing documents..."
+        save_job(job_id, _jobs[job_id])
 
         all_docs = [primary_pdf] + comparison_pdfs
 
@@ -143,6 +153,7 @@ def run_pleading_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
         _jobs[job_id]["progress"] = 100
         _jobs[job_id]["progress_message"] = "Complete"
         _jobs[job_id]["result"] = result
+        save_job(job_id, _jobs[job_id])
         # Build Neo4j graph from results
         try:
             from clients.neo4j_client import build_graph_from_analysis
@@ -155,6 +166,7 @@ def run_pleading_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
         _jobs[job_id]["progress"] = 0
         _jobs[job_id]["progress_message"] = f"Failed: {str(e)}"
         _jobs[job_id]["error"] = str(e)
+        save_job(job_id, _jobs[job_id])
 
 # Submit analysis job — returns immediately with job_id
 @app.post("/analyze")
@@ -196,12 +208,58 @@ def submit_review(request: ReviewRequest):
         "reviewer_note": request.reviewer_note,
         "timestamp": datetime.now().isoformat()
     })
+    save_reviews(_reviews)
     return {"status": "recorded", "total_reviews": len(_reviews)}
 
 @app.get("/reviews/{job_id}")
 def get_reviews(job_id: str):
     job_reviews = [r for r in _reviews if r["job_id"] == job_id]
     return {"job_id": job_id, "reviews": job_reviews, "count": len(job_reviews)}
+
+@app.post("/snapshots")
+def create_snapshot(request: SnapshotRequest):
+    if request.job_id not in _jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _jobs[request.job_id]
+    if job["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Job not complete yet")
+    snapshot = save_snapshot(request.label, job["result"])
+    return {
+        "status": "saved",
+        "snapshot_id": snapshot["id"],
+        "label": snapshot["label"],
+        "timestamp": snapshot["timestamp"],
+        "trial_readiness": snapshot["trial_readiness"],
+        "trial_readiness_score": snapshot["trial_readiness_score"]
+    }
+
+@app.get("/snapshots")
+def list_snapshots():
+    snapshots = load_snapshots()
+    return {
+        "snapshots": [
+            {
+                "id": s["id"],
+                "label": s["label"],
+                "timestamp": s["timestamp"],
+                "trial_readiness": s["trial_readiness"],
+                "trial_readiness_score": s["trial_readiness_score"],
+                "gaps_count": s["gaps_count"],
+                "contradictions_count": s["contradictions_count"],
+                "documents_analysed": s["documents_analysed"]
+            }
+            for s in snapshots
+        ],
+        "count": len(snapshots)
+    }
+
+@app.get("/snapshots/{snapshot_id}")
+def get_snapshot(snapshot_id: int):
+    snapshots = load_snapshots()
+    for s in snapshots:
+        if s["id"] == snapshot_id:
+            return s
+    raise HTTPException(status_code=404, detail="Snapshot not found")
 
 @app.get("/graph")
 def get_graph():
@@ -245,6 +303,7 @@ def run_demo_precompute(job_id: str):
     try:
         from services.pleading_generator import run_pleading_analysis_with_progress
         _jobs[job_id]["status"] = "running"
+        save_job(job_id, _jobs[job_id])
 
         # Best witness combination — produces STRONG 75% with 2 contradictions
         all_docs = [
@@ -264,6 +323,7 @@ def run_demo_precompute(job_id: str):
 
         # Cache it
         _demo_result = result
+        save_demo(result)
 
         # Also build Neo4j graph
         try:
@@ -276,11 +336,13 @@ def run_demo_precompute(job_id: str):
         _jobs[job_id]["progress"] = 100
         _jobs[job_id]["progress_message"] = "Demo pre-computed and cached"
         _jobs[job_id]["result"] = result
+        save_job(job_id, _jobs[job_id])
         print("Demo result cached successfully")
 
     except Exception as e:
         _jobs[job_id]["status"] = "failed"
         _jobs[job_id]["error"] = str(e)
+        save_job(job_id, _jobs[job_id])
         print(f"Demo precompute failed: {e}")
 
 # Poll for job status

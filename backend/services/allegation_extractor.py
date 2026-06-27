@@ -41,16 +41,27 @@ Statement: {document.statement_number}
     response = call_claude(
         prompt=prompt,
         system="You are a precise legal analyst. Always return valid JSON only.",
-        max_tokens=3000
+        max_tokens=4000
     )
 
     # Safely parse JSON
     try:
         raw = json.loads(response)
-    except json.JSONDecodeError:
-        # Claude sometimes wraps in markdown — strip it
-        cleaned = response.strip().strip("```json").strip("```").strip()
-        raw = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        # Try to extract just the JSON array if Claude added extra text
+        import re
+        match = re.search(r'\[.*\]', response, re.DOTALL)
+        if match:
+            try:
+                raw = json.loads(match.group())
+            except json.JSONDecodeError:
+                # Truncated JSON — extract whatever complete objects exist
+                partial = match.group()
+                complete = partial[:partial.rfind('}')+1] + ']'
+                raw = json.loads(complete)
+        else:
+            print(f"WARNING: Could not parse Claude response for {document.witness_name}, returning empty")
+            return []
 
     allegations = []
     for item in raw:

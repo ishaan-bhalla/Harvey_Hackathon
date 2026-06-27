@@ -1,1 +1,140 @@
-import config
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
+
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from services.report_generator import run_analysis
+from services.document_parser import parse_document
+import uuid
+
+app = FastAPI(title="Pleading-to-Proof API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+# In-memory stores
+_documents_cache = None
+_jobs = {}  # job_id -> {status, result, error}
+
+# Request schema
+class AnalysisRequest(BaseModel):
+    primary_pdf: str
+    comparison_pdfs: list[str]
+
+# Health check
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+# Documents list with caching
+@app.get("/documents")
+def list_documents():
+    global _documents_cache
+    if _documents_cache is not None:
+        return _documents_cache
+
+    data_dir = "data/raw"
+    files = sorted([f for f in os.listdir(data_dir) if f.lower().endswith(".pdf")])
+
+    structured = []
+    for filename in files:
+        filepath = os.path.join(data_dir, filename)
+        try:
+            doc = parse_document(filepath)
+            witness_name = doc.witness_name
+            statement_id = doc.statement_number
+        except Exception:
+            witness_name = "Unknown"
+            statement_id = filename.replace(".pdf", "")
+
+        structured.append({
+            "filename": filename,
+            "witness_name": witness_name,
+            "statement_id": statement_id
+        })
+
+    _documents_cache = {"documents": structured, "count": len(structured)}
+    return _documents_cache
+
+# Background analysis task
+def run_analysis_job(job_id: str, primary_pdf: str, comparison_pdfs: list[str]):
+    try:
+        _jobs[job_id]["status"] = "running"
+        report = run_analysis(primary_pdf, comparison_pdfs)
+        _jobs[job_id]["status"] = "complete"
+        _jobs[job_id]["result"] = {
+            "primary_witness": report.primary_witness,
+            "comparison_witnesses": report.comparison_witnesses,
+            "total_claims": report.total_claims,
+            "trial_readiness": report.trial_readiness,
+            "trial_readiness_score": report.trial_readiness_score,
+            "matrix": [
+                {
+                    "allegation_summary": row.allegation_summary,
+                    "allegation_type": row.allegation_type,
+                    "topic": row.topic,
+                    "paragraph_ref": row.paragraph_ref,
+                    "witness_a": row.witness_a,
+                    "supporting": row.supporting,
+                    "contradicting": row.contradicting,
+                    "neutral": row.neutral,
+                    "not_addressed": row.not_addressed,
+                    "gap": row.gap,
+                    "confidence": row.confidence
+                }
+                for row in report.matrix
+            ],
+            "gaps_count": len(report.gaps),
+            "contradictions_count": len(report.contradictions),
+            "gaps": [
+                {
+                    "allegation_summary": row.allegation_summary,
+                    "topic": row.topic,
+                    "paragraph_ref": row.paragraph_ref
+                }
+                for row in report.gaps
+            ],
+            "contradictions": [
+                {
+                    "allegation_summary": row.allegation_summary,
+                    "topic": row.topic,
+                    "contradicting": row.contradicting
+                }
+                for row in report.contradictions
+            ]
+        }
+    except Exception as e:
+        _jobs[job_id]["status"] = "failed"
+        _jobs[job_id]["error"] = str(e)
+
+# Submit analysis job — returns immediately with job_id
+@app.post("/analyze")
+def analyze(request: AnalysisRequest, background_tasks: BackgroundTasks):
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"status": "queued", "result": None, "error": None}
+    background_tasks.add_task(
+        run_analysis_job,
+        job_id,
+        request.primary_pdf,
+        request.comparison_pdfs
+    )
+    return {"job_id": job_id, "status": "queued"}
+
+# Poll for job status
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    if job_id not in _jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _jobs[job_id]
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job["result"],
+        "error": job["error"]
+    }

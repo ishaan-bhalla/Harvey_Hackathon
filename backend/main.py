@@ -21,11 +21,19 @@ app.add_middleware(
 # In-memory stores
 _documents_cache = None
 _jobs = {}  # job_id -> {status, result, error}
+_reviews = []
 
-# Request schema
+# Request schemas
 class AnalysisRequest(BaseModel):
     primary_pdf: str
     comparison_pdfs: list[str]
+
+class ReviewRequest(BaseModel):
+    job_id: str
+    allegation_id: int
+    ai_verdict: str
+    decision: str          # "accepted", "overruled", "rejected"
+    reviewer_note: str = ""
 
 # Health check
 @app.get("/health")
@@ -154,6 +162,24 @@ def analyze_pleading(request: AnalysisRequest, background_tasks: BackgroundTasks
         request.comparison_pdfs
     )
     return {"job_id": job_id, "status": "queued"}
+
+@app.post("/review")
+def submit_review(request: ReviewRequest):
+    from datetime import datetime
+    _reviews.append({
+        "job_id": request.job_id,
+        "allegation_id": request.allegation_id,
+        "ai_verdict": request.ai_verdict,
+        "lawyer_decision": request.decision,
+        "reviewer_note": request.reviewer_note,
+        "timestamp": datetime.now().isoformat()
+    })
+    return {"status": "recorded", "total_reviews": len(_reviews)}
+
+@app.get("/reviews/{job_id}")
+def get_reviews(job_id: str):
+    job_reviews = [r for r in _reviews if r["job_id"] == job_id]
+    return {"job_id": job_id, "reviews": job_reviews, "count": len(job_reviews)}
 
 # Poll for job status
 @app.get("/jobs/{job_id}")

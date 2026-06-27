@@ -5,6 +5,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from clients.claude_client import call_claude
 import json
 
+def verify_quote(quote: str, raw_text: str) -> bool:
+    """
+    String-match the quote back into the source document.
+    If we can't find it verbatim, the citation is unverified.
+    """
+    if not quote:
+        return False
+    # Normalise whitespace for matching
+    normalised_quote = " ".join(quote.split()).lower()
+    normalised_text = " ".join(raw_text.split()).lower()
+    return normalised_quote in normalised_text
+
 HORIZON_PLEADINGS = [
     {
         "id": 1,
@@ -62,39 +74,18 @@ def classify_witness_against_pleading(allegation: dict, document) -> dict:
     relevant passages, then classify.
     """
     import re
+    from utils.text_chunker import find_relevant_chunks
 
-    # Keywords to find relevant sections quickly
     topic_keywords = {
-        "horizon_system": ["horizon", "bug", "error", "defect", "shortfall", "remote", "access"],
-        "knowledge": ["knew", "aware", "knowledge", "known error", "KEL", "reported"],
-        "prosecutions": ["prosecut", "criminal", "disclosure", "defence", "convicted"],
-        "management": ["management", "senior", "director", "decision", "policy"],
-        "financial_losses": ["shortfall", "debt", "repay", "losses", "financial", "pressure"]
+        "horizon_system": ["horizon", "bug", "error", "defect", "shortfall", "remote", "access", "integrity"],
+        "knowledge": ["knew", "aware", "knowledge", "known error", "KEL", "reported", "informed"],
+        "prosecutions": ["prosecut", "criminal", "disclosure", "defence", "convicted", "charges"],
+        "management": ["management", "senior", "director", "decision", "policy", "board"],
+        "financial_losses": ["shortfall", "debt", "repay", "losses", "financial", "pressure", "make good"]
     }
 
     keywords = topic_keywords.get(allegation["topic"], [])
-    full_text = document.raw_text
-
-    # Find paragraphs containing relevant keywords
-    paragraphs = full_text.split("\n")
-    relevant_sections = []
-
-    for i, para in enumerate(paragraphs):
-        para_lower = para.lower()
-        if any(kw in para_lower for kw in keywords):
-            # Include surrounding context
-            start = max(0, i - 2)
-            end = min(len(paragraphs), i + 3)
-            section = " ".join(paragraphs[start:end]).strip()
-            if len(section) > 50:
-                relevant_sections.append(section)
-
-    # Take top 5 most relevant sections
-    relevant_text = "\n---\n".join(relevant_sections[:5])
-
-    # If nothing found via keywords, use first 3000 chars
-    if not relevant_text:
-        relevant_text = full_text[:3000]
+    relevant_text = find_relevant_chunks(document.raw_text, keywords)
 
     prompt = f"""You are a litigation analyst for the Post Office Horizon IT Inquiry.
 
@@ -135,12 +126,24 @@ Return ONLY valid JSON:
             "reasoning": "Could not parse response"
         }
 
+    # Verify the quote actually exists in the document
+    passage = result.get("relevant_passage")
+    if passage and not verify_quote(passage, document.raw_text):
+        result["relevant_passage"] = None
+        result["verified"] = False
+        result["confidence"] = "LOW"
+        if result["verdict"] in ["SUPPORTS", "CONTRADICTS"]:
+            result["verdict"] = "UNVERIFIED"
+    else:
+        result["verified"] = True
+
     return {
         "allegation_id": allegation["id"],
         "allegation": allegation["allegation"],
         "topic": allegation["topic"],
         "witness": document.witness_name,
         "statement_id": document.statement_number,
+        "verified": result.get("verified", True),
         **result
     }
 
